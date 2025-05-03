@@ -1,0 +1,66 @@
+pipeline {
+    agent any
+
+    environment {
+        PROJECT_ID = 'swe645-extracredit'
+        REGION = 'us-east1'
+        REPO_NAME = 'django-survey'
+        IMAGE_NAME = 'django-backend'
+        IMAGE_TAG = "v${env.BUILD_NUMBER}"
+        CLUSTER_NAME = 'django-cluster'
+        DEPLOYMENT_NAME = 'django-survey-deployment'
+        DEPLOYMENT_YAML = 'deployment.yaml'
+        SERVICE_YAML = 'service.yaml'
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Set up Google Auth') {
+            steps {
+                withCredentials([file(credentialsId: 'gcp-service-account-key', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+                    sh '''
+                        gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS
+                        gcloud config set project $PROJECT_ID
+                        gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+                    '''
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                    docker buildx create --use --name builder || true
+                    docker buildx build --platform linux/amd64 \
+                      -t $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$IMAGE_NAME:$IMAGE_TAG \
+                      --push .
+                '''
+            }
+        }
+
+        stage('Update Kubernetes Deployment') {
+            steps {
+                sh '''
+                    gcloud container clusters get-credentials $CLUSTER_NAME --region=$REGION
+                    sed -i "s|image: .*$|image: $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$IMAGE_NAME:$IMAGE_TAG|" $DEPLOYMENT_YAML
+                    kubectl apply -f $DEPLOYMENT_YAML
+                    kubectl apply -f $SERVICE_YAML
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Deployment successful at build ${env.BUILD_NUMBER}"
+        }
+        failure {
+            echo "❌ Build failed. Check the Jenkins logs."
+        }
+    }
+}
